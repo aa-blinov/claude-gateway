@@ -1,20 +1,20 @@
-<!-- house-style: template — fill this file in, then delete this line -->
-
 # Screenshots
 
-Images referenced from the README and the documents.
+There are no screenshots in this repository, and this folder holds no image
+files.
 
-<!--
-  Put the files here and reference them from the README:
+The service has no interface to photograph. It answers in JSON over HTTP, and
+the only thing a person sees is what their own client renders. A screenshot
+would show that client's window, not this project.
 
-  ```markdown
-  ![The main window](docs/screenshots/main.png)
-  ```
+What there is instead is a written record of the answer, and it stands in three
+places:
 
-  Images are referenced by relative path, so they resolve both on GitHub and
-  in a local checkout. The house-style checker verifies that every image
-  reference points at a file that exists, so a renamed screenshot cannot
-  quietly break the README.
+- the four routes and the bodies they answer with, in
+  [../architecture.md](../architecture.md);
+- the error envelope and the status vocabulary, in
+  [../../DESIGN.md](../../DESIGN.md);
+- a request and its answer, in [../../README.md](../../README.md).
 
-  Delete this file once the project has images of its own.
--->
+If a screenshot is added later, it belongs in this folder and is referenced by
+a relative path, so that it resolves both on GitHub and in a local checkout.
