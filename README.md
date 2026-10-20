@@ -1,24 +1,34 @@
 # claude-gateway
 
-OpenAI-compatible HTTP gateway over the [Claude Code CLI](https://github.com/anthropics/claude-code).
+An HTTP gateway that speaks the OpenAI API and answers with Claude Code. Every
+request becomes a `claude --print` call on your own machine, using the
+session you are already signed into, so the reply comes from an agent that can
+read files and run bash. Point any OpenAI-compatible client at
+`http://127.0.0.1:8000` and give it any API key.
 
-## Why
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/aa-blinov/claude-gateway.svg)](https://github.com/aa-blinov/claude-gateway/releases/latest)
+[![Go](https://img.shields.io/badge/go-1.22-00ADD8)](https://go.dev/)
 
-The Anthropic API already has an HTTP interface, but it requires an API key and doesn't include Claude Code's agentic capabilities (file access, bash, tools). Claude Code CLI, on the other hand, uses your existing OAuth session and runs as a full agent — but has no HTTP API.
+---
 
-`claude-gateway` bridges that gap: it exposes a standard OpenAI-compatible API and translates each request into a `claude --print` subprocess call, so any OpenAI-compatible client works with Claude Code out of the box.
+## Quick start
 
-## Requirements
+Claude Code has to be installed and signed in (`claude auth login`), and the
+`claude` binary has to be on `PATH`. Then, from a clone of this repository:
 
-- [Claude Code](https://github.com/anthropics/claude-code) installed and authenticated (`claude auth login`)
-- The `claude` binary on `PATH`, or pass it explicitly via `--claude-bin`
+```bash
+go build -o claude-gateway .
+./claude-gateway --port 8000
+```
 
-## Installation
+Go 1.22 or newer. The binary has no dependencies of its own.
 
-Download the binary for your platform from [Releases](https://github.com/aa-blinov/claude-gateway/releases/latest):
+The [release](https://github.com/aa-blinov/claude-gateway/releases/latest) carries
+a build for six platforms:
 
 | Platform | File |
-|----------|------|
+| --- | --- |
 | Windows x64 | `claude-gateway-windows-amd64.exe` |
 | Windows ARM64 | `claude-gateway-windows-arm64.exe` |
 | Linux x64 | `claude-gateway-linux-amd64` |
@@ -26,116 +36,128 @@ Download the binary for your platform from [Releases](https://github.com/aa-blin
 | macOS x64 | `claude-gateway-darwin-amd64` |
 | macOS Apple Silicon | `claude-gateway-darwin-arm64` |
 
-Or build from source (requires Go 1.22+):
+A request from the shell looks like this:
 
 ```bash
-go build -o claude-gateway .
-```
-
-## Usage
-
-```bash
-./claude-gateway --port 8000
-./claude-gateway --port 8000 --no-tools        # pure LLM mode, no file/bash access
-./claude-gateway --claude-bin /path/to/claude --port 8000
-```
-
-Point any OpenAI-compatible client at `http://127.0.0.1:8000` with any API key (not validated).
-
-### Options
-
-| Flag | Env var | Default | Description |
-|------|---------|---------|-------------|
-| `--host` | `CLAUDE_GATEWAY_HOST` | `127.0.0.1` | Listen address |
-| `--port` | `CLAUDE_GATEWAY_PORT` | `8000` | Listen port |
-| `--claude-bin` | `CLAUDE_GATEWAY_BIN` | `claude` | Path to claude binary |
-| `--no-tools` | `CLAUDE_GATEWAY_NO_TOOLS` | false | Disable all Claude Code tools (pure LLM mode) |
-| `--max-concurrency` | `CLAUDE_GATEWAY_MAX_CONCURRENCY` | `100` | Max parallel claude processes |
-| `--timeout-seconds` | `CLAUDE_GATEWAY_TIMEOUT_SECONDS` | `600` | Per-request timeout |
-
-## API
-
-### `GET /v1/models`
-
-Returns the built-in Claude model list. Override with `CLAUDE_GATEWAY_MODELS=model-a,model-b`.
-
-### `POST /v1/chat/completions`
-
-Standard OpenAI chat completions with optional streaming:
-
-```bash
-# Non-streaming
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H 'content-type: application/json' \
-  -d '{
-    "model": "claude-sonnet-4-6",
-    "messages": [{"role": "user", "content": "Say hello"}]
-  }'
-
-# Streaming
-curl http://127.0.0.1:8000/v1/chat/completions \
-  -H 'content-type: application/json' \
-  -d '{
-    "model": "claude-sonnet-4-6",
-    "stream": true,
-    "messages": [{"role": "user", "content": "Count to 5"}]
-  }'
+  -d '{"model": "claude-sonnet-4-6", "messages": [{"role": "user", "content": "Say hello"}]}'
 ```
 
-### `POST /v1/responses`
+Any API key is accepted, because the server never reads the `Authorization`
+header.
 
-Stateless subset of the OpenAI Responses API:
+## What it does
+
+The Anthropic API needs an API key and has no agent loop of its own. Claude
+Code has the session and the tools but speaks no HTTP. The gateway is the join
+between the two.
+
+- **Serve the OpenAI routes.** `GET /v1/models`, `POST /v1/chat/completions`,
+  `POST /v1/responses` and `GET /healthz` answer in the OpenAI shapes, so a
+  client that already speaks OpenAI needs no change.
+- **Run the request as Claude Code.** The conversation is written to the
+  standard input of `claude --print`, and Claude Code runs the agent loop
+  itself: file access, bash and the rest of its tools.
+- **Stream the answer.** With `"stream": true` the reply arrives as
+  server-sent events, one `chat.completion.chunk` per piece of text.
+- **Choose how much the model thinks.** `reasoning_effort`, or
+  `reasoning.effort`, takes `low`, `medium`, `high` or `max`.
+- **Hold the answer to a schema.** `response_format.type = "json_schema"` goes
+  to Claude Code as `--json-schema`, and the model answers with JSON that
+  follows it.
+- **Turn the tools off.** `--no-tools` runs the CLI with an empty tool list,
+  which leaves a plain model behind a plain HTTP API.
+- **Refuse what it cannot serve.** A request field the gateway does not
+  implement comes back as a 400 that names the field, rather than being
+  dropped on the way to the CLI.
+
+## How it works
+
+```
+request -> validate -> build the prompt -> claude --print -> parse -> OpenAI shape
+```
+
+`main.go` is the whole server: the flags, the four routes, the validation, the
+call to the CLI and the translation back. It uses the standard library only.
+
+| Route | What it does |
+| --- | --- |
+| `GET /v1/models` | The model list, three names unless `CLAUDE_GATEWAY_MODELS` says otherwise. |
+| `POST /v1/chat/completions` | A chat completion, plain or streaming. |
+| `POST /v1/responses` | The stateless part of the OpenAI Responses API. |
+| `GET /healthz` | `{"status":"ok"}`. |
+
+The `messages` array becomes one prompt. System and developer messages are
+joined and handed over as `--system-prompt`; user and assistant turns are
+written to standard input as `USER:` and `ASSISTANT:` blocks, separated by a
+blank line. Nothing is kept between requests, and every call carries
+`--no-session-persistence`, so the CLI starts from scratch each time.
+
+An ordinary request runs the CLI with `--output-format json`, and the whole of
+its standard output is parsed as one object with `result`, `is_error` and
+`stop_reason`. A `max_tokens` stop reason becomes the `length` finish reason,
+and anything else becomes `stop`.
+
+A streaming request runs the CLI again, this time with `--output-format
+stream-json --verbose --include-partial-messages`. The server reads the output
+line by line and turns every `content_block_delta` carrying a `text_delta`
+into one `chat.completion.chunk`, then writes `data: [DONE]`.
+
+The CLI runs with the permissions of the user who started the gateway, so the
+bash it runs and the files it reads are that user's.
+
+## Configuration
+
+Every flag has an environment variable behind it, and the flag wins when both
+are given.
+
+| Flag | Environment variable | Default | What it does |
+| --- | --- | --- | --- |
+| `--host` | `CLAUDE_GATEWAY_HOST` | `127.0.0.1` | The address to listen on. |
+| `--port` | `CLAUDE_GATEWAY_PORT` | `8000` | The port to listen on. |
+| `--claude-bin` | `CLAUDE_GATEWAY_BIN` | `claude` | The path of the Claude Code binary. |
+| `--no-tools` | `CLAUDE_GATEWAY_NO_TOOLS` | `false` | Turns the Claude Code tools off. |
+| `--max-concurrency` | `CLAUDE_GATEWAY_MAX_CONCURRENCY` | `100` | How many Claude processes may run at once. |
+| `--timeout-seconds` | `CLAUDE_GATEWAY_TIMEOUT_SECONDS` | `600` | How long one request may take. |
+
+`CLAUDE_GATEWAY_NO_TOOLS` counts as true when it is `1` or `true`, in any
+case. A `--max-concurrency` or a `--timeout-seconds` below 1 stops the process
+at startup.
+
+One variable has no flag:
+
+| Environment variable | Default | What it does |
+| --- | --- | --- |
+| `CLAUDE_GATEWAY_MODELS` | three built-in names | The list `GET /v1/models` returns, comma separated. |
+
+The built-in names are `claude-opus-4-6`, `claude-sonnet-4-6` and
+`claude-haiku-4-5-20251001`. They decide what `/v1/models` answers and nothing
+else: the model in a request is passed to the CLI as it is.
+
+## Development
 
 ```bash
-curl http://127.0.0.1:8000/v1/responses \
-  -H 'content-type: application/json' \
-  -d '{
-    "model": "claude-sonnet-4-6",
-    "instructions": "Reply briefly.",
-    "input": "What is 2+2?"
-  }'
+make test       # go test -v ./...
+make build      # dist/claude-gateway
+make build-all  # the six platform binaries, in dist/
+make clean      # remove dist/
 ```
 
-### `GET /healthz`
+Go 1.22 or newer, and nothing else: `go.mod` has no requirements, and the
+server is built from the standard library.
 
-Health check — returns `{"status":"ok"}`.
+| Path | What it holds |
+| --- | --- |
+| `main.go` | The server: flags, routes, validation, the call to the CLI. |
+| `main_test.go` | The tests for the parsing helpers. |
+| `Makefile` | The test, the build and the cross build. |
+| `go.mod` | The module. Go 1.22, no dependencies. |
 
-## Reasoning effort
+The suite covers the helpers that turn a request into a prompt. Nothing in it
+starts the server or runs the CLI, so a change to a handler or to the CLI
+arguments is not covered by `make test`.
 
-Pass `reasoning_effort` (or `reasoning.effort`) to control how much thinking Claude does:
+## License
 
-```json
-{ "model": "claude-sonnet-4-6", "reasoning_effort": "max", "messages": [...] }
-```
-
-Supported values: `low`, `medium`, `high`, `max`.
-
-## Structured output
-
-Pass `response_format.type = "json_schema"` to enforce a JSON Schema on the output:
-
-```json
-{
-  "model": "claude-sonnet-4-6",
-  "response_format": {
-    "type": "json_schema",
-    "json_schema": { "schema": { "type": "object", "properties": { "answer": { "type": "string" } } } }
-  },
-  "messages": [{ "role": "user", "content": "What is 2+2?" }]
-}
-```
-
-## Why tools are not supported
-
-The OpenAI tools API works as a two-phase loop: the model emits a `tool_calls` response, the **client** executes the tool, then sends the result back.
-
-The Claude Code CLI handles tool execution internally — it runs bash commands, reads files, and calls APIs on its own, without exposing intermediate `tool_calls` to the caller. There is no way to intercept that loop and re-expose it as OpenAI-style function calling.
-
-If you need client-controlled tool use, call the Anthropic API directly or use a proxy like [LiteLLM](https://github.com/BerriAI/litellm). The value of this gateway is using your existing Claude Code auth and its built-in agentic execution — controllable via `--no-tools` if you want pure LLM mode.
-
-## Not supported
-
-- `tools` / `tool_choice` in the request body — see above
-- Sampling parameters (`temperature`, `top_p`, etc.)
-- Multi-turn server-side state (`previous_response_id`)
-- `n > 1`
+MIT, © Alexander Blinov. See [LICENSE](LICENSE).
